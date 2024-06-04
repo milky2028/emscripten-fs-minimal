@@ -372,22 +372,6 @@ function alignfault() {
   abort("alignment fault");
 }
 
-function intArrayFromBase64(s) {
-  var decoded = atob(s);
-  var bytes = new Uint8Array(decoded.length);
-  for (var i = 0; i < decoded.length; ++i) {
-    bytes[i] = decoded.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function tryParseAsDataURI(filename) {
-  if (!isDataURI(filename)) {
-    return;
-  }
-  return intArrayFromBase64(filename.slice(dataURIPrefix.length));
-}
-
 var wasmMemory;
 
 var wasmModule;
@@ -616,6 +600,43 @@ function removeRunDependency(id) {
   throw e;
 }
 
+var FS = {
+  error() {
+    abort("Filesystem support (FS) was not included. The problem is that you are using files from JS, but files were not used from C/C++, so filesystem support was not auto-included. You can force-include filesystem support with -sFORCE_FILESYSTEM");
+  },
+  init() {
+    FS.error();
+  },
+  createDataFile() {
+    FS.error();
+  },
+  createPreloadedFile() {
+    FS.error();
+  },
+  createLazyFile() {
+    FS.error();
+  },
+  open() {
+    FS.error();
+  },
+  mkdev() {
+    FS.error();
+  },
+  registerDevice() {
+    FS.error();
+  },
+  analyzePath() {
+    FS.error();
+  },
+  ErrnoError() {
+    FS.error();
+  }
+};
+
+Module["FS_createDataFile"] = FS.createDataFile;
+
+Module["FS_createPreloadedFile"] = FS.createPreloadedFile;
+
 var dataURIPrefix = "data:application/octet-stream;base64,";
 
 /**
@@ -827,6 +848,13 @@ function unexportedRuntimeSymbol(sym) {
 function dbg(...args) {
   console.warn(...args);
 }
+
+var ASM_CONSTS = {
+  86216: $0 => {
+    const event = new CustomEvent(UTF8ToString($0));
+    dispatchEvent(event);
+  }
+};
 
 /** @constructor */ function ExitStatus(status) {
   this.name = "ExitStatus";
@@ -2507,8 +2535,7 @@ var __emscripten_receive_on_main_thread_js = (funcIndex, emAsmAddr, callingThrea
   for (var i = 0; i < numCallArgs; i++) {
     proxiedJSCallArgs[i] = SAFE_HEAP_LOAD_D((b + i) * 8, 8, 0);
   }
-  assert(!emAsmAddr);
-  var func = proxiedFunctionTable[funcIndex];
+  var func = emAsmAddr ? ASM_CONSTS[emAsmAddr] : proxiedFunctionTable[funcIndex];
   assert(!(funcIndex && emAsmAddr));
   assert(func.length == numCallArgs, "Call args mismatch in _emscripten_receive_on_main_thread_js");
   PThread.currentProxiedOperationCallerThread = callingThread;
@@ -2563,39 +2590,6 @@ var __wasmfs_get_preloaded_path_name = (index, fileNameBuffer) => {
   var len = lengthBytesUTF8(s) + 1;
   stringToUTF8(s, fileNameBuffer, len);
 };
-
-var __wasmfs_jsimpl_alloc_file = (backend, file) => {
-  assert(wasmFS$backends[backend]);
-  return wasmFS$backends[backend].allocFile(file);
-};
-
-var __wasmfs_jsimpl_free_file = (backend, file) => {
-  assert(wasmFS$backends[backend]);
-  return wasmFS$backends[backend].freeFile(file);
-};
-
-var __wasmfs_jsimpl_get_size = (backend, file) => {
-  assert(wasmFS$backends[backend]);
-  return wasmFS$backends[backend].getSize(file);
-};
-
-function __wasmfs_jsimpl_read(backend, file, buffer, length, offset_low, offset_high) {
-  var offset = convertI32PairToI53Checked(offset_low, offset_high);
-  assert(wasmFS$backends[backend]);
-  if (!wasmFS$backends[backend].read) {
-    return -28;
-  }
-  return wasmFS$backends[backend].read(file, buffer, length, offset);
-}
-
-function __wasmfs_jsimpl_write(backend, file, buffer, length, offset_low, offset_high) {
-  var offset = convertI32PairToI53Checked(offset_low, offset_high);
-  assert(wasmFS$backends[backend]);
-  if (!wasmFS$backends[backend].write) {
-    return -28;
-  }
-  return wasmFS$backends[backend].write(file, buffer, length, offset);
-}
 
 class HandleAllocator {
   constructor() {
@@ -2985,6 +2979,37 @@ var __wasmfs_thread_utils_heartbeat = queue => {
   }, 50);
 };
 
+var readEmAsmArgsArray = [];
+
+var readEmAsmArgs = (sigPtr, buf) => {
+  assert(Array.isArray(readEmAsmArgsArray));
+  assert(buf % 16 == 0);
+  readEmAsmArgsArray.length = 0;
+  var ch;
+  while (ch = SAFE_HEAP_LOAD(sigPtr++, 1, 1)) {
+    var chr = String.fromCharCode(ch);
+    var validChars = [ "d", "f", "i", "p" ];
+    assert(validChars.includes(chr), `Invalid character ${ch}("${chr}") in readEmAsmArgs! Use only [${validChars}], and do not specify "v" for void return argument.`);
+    var wide = (ch != 105);
+    wide &= (ch != 112);
+    buf += wide && (buf % 8) ? 4 : 0;
+    readEmAsmArgsArray.push( ch == 112 ? SAFE_HEAP_LOAD(((buf) >> 2) * 4, 4, 1) : ch == 105 ? SAFE_HEAP_LOAD(((buf) >> 2) * 4, 4, 0) : SAFE_HEAP_LOAD_D(((buf) >> 3) * 8, 8, 0));
+    buf += wide ? 8 : 4;
+  }
+  return readEmAsmArgsArray;
+};
+
+var runMainThreadEmAsm = (emAsmAddr, sigPtr, argbuf, sync) => {
+  var args = readEmAsmArgs(sigPtr, argbuf);
+  if (ENVIRONMENT_IS_PTHREAD) {
+    return proxyToMainThread(0, emAsmAddr, sync, ...args);
+  }
+  assert(ASM_CONSTS.hasOwnProperty(emAsmAddr), `No EM_ASM constant found at address ${emAsmAddr}.  The loaded WebAssembly file is likely out of sync with the generated JavaScript.`);
+  return ASM_CONSTS[emAsmAddr](...args);
+};
+
+var _emscripten_asm_const_int_sync_on_main_thread = (emAsmAddr, sigPtr, argbuf) => runMainThreadEmAsm(emAsmAddr, sigPtr, argbuf, 1);
+
 var _emscripten_check_blocking_allowed = () => {
   if (ENVIRONMENT_IS_WORKER) return;
   warnOnce("Blocking on the main thread is very dangerous, see https://emscripten.org/docs/porting/pthreads.html#blocking-on-the-main-browser-thread");
@@ -3039,633 +3064,6 @@ var randomFill = view => (randomFill = initRandomFill())(view);
 var _getentropy = (buffer, size) => {
   randomFill(HEAPU8.subarray(buffer, buffer + size));
   return 0;
-};
-
-var MEMFS = {
-  createBackend(opts) {
-    return _wasmfs_create_memory_backend();
-  }
-};
-
-var PATH = {
-  isAbs: path => path.charAt(0) === "/",
-  splitPath: filename => {
-    var splitPathRe = /^(\/?|)([\s\S]*?)((?:\.{1,2}|[^\/]+?|)(\.[^.\/]*|))(?:[\/]*)$/;
-    return splitPathRe.exec(filename).slice(1);
-  },
-  normalizeArray: (parts, allowAboveRoot) => {
-    var up = 0;
-    for (var i = parts.length - 1; i >= 0; i--) {
-      var last = parts[i];
-      if (last === ".") {
-        parts.splice(i, 1);
-      } else if (last === "..") {
-        parts.splice(i, 1);
-        up++;
-      } else if (up) {
-        parts.splice(i, 1);
-        up--;
-      }
-    }
-    if (allowAboveRoot) {
-      for (;up; up--) {
-        parts.unshift("..");
-      }
-    }
-    return parts;
-  },
-  normalize: path => {
-    var isAbsolute = PATH.isAbs(path), trailingSlash = path.substr(-1) === "/";
-    path = PATH.normalizeArray(path.split("/").filter(p => !!p), !isAbsolute).join("/");
-    if (!path && !isAbsolute) {
-      path = ".";
-    }
-    if (path && trailingSlash) {
-      path += "/";
-    }
-    return (isAbsolute ? "/" : "") + path;
-  },
-  dirname: path => {
-    var result = PATH.splitPath(path), root = result[0], dir = result[1];
-    if (!root && !dir) {
-      return ".";
-    }
-    if (dir) {
-      dir = dir.substr(0, dir.length - 1);
-    }
-    return root + dir;
-  },
-  basename: path => {
-    if (path === "/") return "/";
-    path = PATH.normalize(path);
-    path = path.replace(/\/$/, "");
-    var lastSlash = path.lastIndexOf("/");
-    if (lastSlash === -1) return path;
-    return path.substr(lastSlash + 1);
-  },
-  join: (...paths) => PATH.normalize(paths.join("/")),
-  join2: (l, r) => PATH.normalize(l + "/" + r)
-};
-
-var stringToUTF8OnStack = str => {
-  var size = lengthBytesUTF8(str) + 1;
-  var ret = stackAlloc(size);
-  stringToUTF8(str, ret, size);
-  return ret;
-};
-
-var withStackSave = f => {
-  var stack = stackSave();
-  var ret = f();
-  stackRestore(stack);
-  return ret;
-};
-
-var readI53FromI64 = ptr => SAFE_HEAP_LOAD(((ptr) >> 2) * 4, 4, 1) + SAFE_HEAP_LOAD((((ptr) + (4)) >> 2) * 4, 4, 0) * 4294967296;
-
-var readI53FromU64 = ptr => SAFE_HEAP_LOAD(((ptr) >> 2) * 4, 4, 1) + SAFE_HEAP_LOAD((((ptr) + (4)) >> 2) * 4, 4, 1) * 4294967296;
-
-var FS_mknod = (path, mode, dev) => FS.handleError(withStackSave(() => {
-  var pathBuffer = stringToUTF8OnStack(path);
-  return __wasmfs_mknod(pathBuffer, mode, dev);
-}));
-
-var FS_create = (path, mode = 438) => {
-  /* 0666 */ mode &= 4095;
-  mode |= 32768;
-  return FS_mknod(path, mode, 0);
-};
-
-var FS_writeFile = (path, data) => {
-  var sp = stackSave();
-  var pathBuffer = stringToUTF8OnStack(path);
-  if (typeof data == "string") {
-    var buf = new Uint8Array(lengthBytesUTF8(data) + 1);
-    var actualNumBytes = stringToUTF8Array(data, buf, 0, buf.length);
-    data = buf.slice(0, actualNumBytes);
-  }
-  var dataBuffer = _malloc(data.length);
-  assert(dataBuffer);
-  for (var i = 0; i < data.length; i++) {
-    SAFE_HEAP_STORE((dataBuffer) + (i), data[i], 1);
-  }
-  var ret = __wasmfs_write_file(pathBuffer, dataBuffer, data.length);
-  _free(dataBuffer);
-  stackRestore(sp);
-  return ret;
-};
-
-var FS_createDataFile = (parent, name, fileData, canRead, canWrite, canOwn) => {
-  var pathName = name ? parent + "/" + name : parent;
-  var mode = FS_getMode(canRead, canWrite);
-  if (!wasmFSPreloadingFlushed) {
-    wasmFSPreloadedFiles.push({
-      pathName: pathName,
-      fileData: fileData,
-      mode: mode
-    });
-  } else {
-    FS_create(pathName, mode);
-    FS_writeFile(pathName, fileData);
-  }
-};
-
-/** @param {boolean=} noRunDep */ var asyncLoad = (url, onload, onerror, noRunDep) => {
-  var dep = !noRunDep ? getUniqueRunDependency(`al ${url}`) : "";
-  readAsync(url, arrayBuffer => {
-    assert(arrayBuffer, `Loading data file "${url}" failed (no arrayBuffer).`);
-    onload(new Uint8Array(arrayBuffer));
-    if (dep) removeRunDependency(dep);
-  }, event => {
-    if (onerror) {
-      onerror();
-    } else {
-      throw `Loading data file "${url}" failed.`;
-    }
-  });
-  if (dep) addRunDependency(dep);
-};
-
-var PATH_FS = {
-  resolve: (...args) => {
-    var resolvedPath = "", resolvedAbsolute = false;
-    for (var i = args.length - 1; i >= -1 && !resolvedAbsolute; i--) {
-      var path = (i >= 0) ? args[i] : FS.cwd();
-      if (typeof path != "string") {
-        throw new TypeError("Arguments to path.resolve must be strings");
-      } else if (!path) {
-        return "";
-      }
-      resolvedPath = path + "/" + resolvedPath;
-      resolvedAbsolute = PATH.isAbs(path);
-    }
-    resolvedPath = PATH.normalizeArray(resolvedPath.split("/").filter(p => !!p), !resolvedAbsolute).join("/");
-    return ((resolvedAbsolute ? "/" : "") + resolvedPath) || ".";
-  },
-  relative: (from, to) => {
-    from = PATH_FS.resolve(from).substr(1);
-    to = PATH_FS.resolve(to).substr(1);
-    function trim(arr) {
-      var start = 0;
-      for (;start < arr.length; start++) {
-        if (arr[start] !== "") break;
-      }
-      var end = arr.length - 1;
-      for (;end >= 0; end--) {
-        if (arr[end] !== "") break;
-      }
-      if (start > end) return [];
-      return arr.slice(start, end - start + 1);
-    }
-    var fromParts = trim(from.split("/"));
-    var toParts = trim(to.split("/"));
-    var length = Math.min(fromParts.length, toParts.length);
-    var samePartsLength = length;
-    for (var i = 0; i < length; i++) {
-      if (fromParts[i] !== toParts[i]) {
-        samePartsLength = i;
-        break;
-      }
-    }
-    var outputParts = [];
-    for (var i = samePartsLength; i < fromParts.length; i++) {
-      outputParts.push("..");
-    }
-    outputParts = outputParts.concat(toParts.slice(samePartsLength));
-    return outputParts.join("/");
-  }
-};
-
-var preloadPlugins = Module["preloadPlugins"] || [];
-
-var FS_handledByPreloadPlugin = (byteArray, fullname, finish, onerror) => {
-  if (typeof Browser != "undefined") Browser.init();
-  var handled = false;
-  preloadPlugins.forEach(plugin => {
-    if (handled) return;
-    if (plugin["canHandle"](fullname)) {
-      plugin["handle"](byteArray, fullname, finish, onerror);
-      handled = true;
-    }
-  });
-  return handled;
-};
-
-var FS_createPreloadedFile = (parent, name, url, canRead, canWrite, onload, onerror, dontCreateFile, canOwn, preFinish) => {
-  var fullname = name ? PATH_FS.resolve(PATH.join2(parent, name)) : parent;
-  var dep = getUniqueRunDependency(`cp ${fullname}`);
-  function processData(byteArray) {
-    function finish(byteArray) {
-      preFinish?.();
-      if (!dontCreateFile) {
-        FS_createDataFile(parent, name, byteArray, canRead, canWrite, canOwn);
-      }
-      onload?.();
-      removeRunDependency(dep);
-    }
-    if (FS_handledByPreloadPlugin(byteArray, fullname, finish, () => {
-      onerror?.();
-      removeRunDependency(dep);
-    })) {
-      return;
-    }
-    finish(byteArray);
-  }
-  addRunDependency(dep);
-  if (typeof url == "string") {
-    asyncLoad(url, processData, onerror);
-  } else {
-    processData(url);
-  }
-};
-
-var FS_getMode = (canRead, canWrite) => {
-  var mode = 0;
-  if (canRead) mode |= 292 | 73;
-  if (canWrite) mode |= 146;
-  return mode;
-};
-
-var FS_modeStringToFlags = str => {
-  var flagModes = {
-    "r": 0,
-    "r+": 2,
-    "w": 512 | 64 | 1,
-    "w+": 512 | 64 | 2,
-    "a": 1024 | 64 | 1,
-    "a+": 1024 | 64 | 2
-  };
-  var flags = flagModes[str];
-  if (typeof flags == "undefined") {
-    throw new Error(`Unknown file open mode: ${str}`);
-  }
-  return flags;
-};
-
-var FS_mkdir = (path, mode = 511) => /* 0777 */ FS.handleError(withStackSave(() => {
-  var buffer = stringToUTF8OnStack(path);
-  return __wasmfs_mkdir(buffer, mode);
-}));
-
-/**
-     * @param {number=} mode Optionally, the mode to create in. Uses mkdir's
-     *                       default if not set.
-     */ var FS_mkdirTree = (path, mode) => {
-  var dirs = path.split("/");
-  var d = "";
-  for (var i = 0; i < dirs.length; ++i) {
-    if (!dirs[i]) continue;
-    d += "/" + dirs[i];
-    try {
-      FS_mkdir(d, mode);
-    } catch (e) {
-      if (e.errno != 20) throw e;
-    }
-  }
-};
-
-var FS_unlink = path => withStackSave(() => {
-  var buffer = stringToUTF8OnStack(path);
-  return __wasmfs_unlink(buffer);
-});
-
-var wasmFS$backends = {};
-
-var wasmFSDevices = {};
-
-var wasmFSDeviceStreams = {};
-
-var FS = {
-  init() {
-    FS.ensureErrnoError();
-  },
-  ErrnoError: null,
-  handleError(returnValue) {
-    if (returnValue < 0) {
-      throw new FS.ErrnoError(-returnValue);
-    }
-    return returnValue;
-  },
-  ensureErrnoError() {
-    if (FS.ErrnoError) return;
-    FS.ErrnoError = /** @this{Object} */ function ErrnoError(code) {
-      this.errno = code;
-      this.message = "FS error";
-      this.name = "ErrnoError";
-    };
-    FS.ErrnoError.prototype = new Error;
-    FS.ErrnoError.prototype.constructor = FS.ErrnoError;
-  },
-  createDataFile(parent, name, fileData, canRead, canWrite, canOwn) {
-    FS_createDataFile(parent, name, fileData, canRead, canWrite, canOwn);
-  },
-  createPath(parent, path, canRead, canWrite) {
-    var parts = path.split("/").reverse();
-    while (parts.length) {
-      var part = parts.pop();
-      if (!part) continue;
-      var current = PATH.join2(parent, part);
-      if (!wasmFSPreloadingFlushed) {
-        wasmFSPreloadedDirs.push({
-          parentPath: parent,
-          childName: part
-        });
-      } else {
-        FS.mkdir(current);
-      }
-      parent = current;
-    }
-    return current;
-  },
-  createPreloadedFile(parent, name, url, canRead, canWrite, onload, onerror, dontCreateFile, canOwn, preFinish) {
-    return FS_createPreloadedFile(parent, name, url, canRead, canWrite, onload, onerror, dontCreateFile, canOwn, preFinish);
-  },
-  readFile(path, opts = {}) {
-    opts.encoding = opts.encoding || "binary";
-    if (opts.encoding !== "utf8" && opts.encoding !== "binary") {
-      throw new Error('Invalid encoding type "' + opts.encoding + '"');
-    }
-    var sp = stackSave();
-    var buf = __wasmfs_read_file(stringToUTF8OnStack(path));
-    stackRestore(sp);
-    var length = readI53FromI64(buf);
-    var ret = new Uint8Array(HEAPU8.subarray(buf + 8, buf + 8 + length));
-    if (opts.encoding === "utf8") {
-      ret = UTF8ArrayToString(ret, 0);
-    }
-    return ret;
-  },
-  cwd: () => UTF8ToString(__wasmfs_get_cwd()),
-  analyzePath(path) {
-    var exists = !!FS.findObject(path);
-    return {
-      exists: exists,
-      object: {
-        contents: exists ? FS.readFile(path) : null
-      }
-    };
-  },
-  mkdir: (path, mode) => FS_mkdir(path, mode),
-  mkdirTree: (path, mode) => FS_mkdirTree(path, mode),
-  rmdir: path => FS.handleError(withStackSave(() => __wasmfs_rmdir(stringToUTF8OnStack(path)))),
-  open: (path, flags, mode) => withStackSave(() => {
-    flags = typeof flags == "string" ? FS_modeStringToFlags(flags) : flags;
-    mode = typeof mode == "undefined" ? 438 : /* 0666 */ mode;
-    var buffer = stringToUTF8OnStack(path);
-    var fd = FS.handleError(__wasmfs_open(buffer, flags, mode));
-    return {
-      fd: fd
-    };
-  }),
-  create: (path, mode) => FS_create(path, mode),
-  close: stream => FS.handleError(-__wasmfs_close(stream.fd)),
-  unlink: path => FS_unlink(path),
-  chdir: path => withStackSave(() => {
-    var buffer = stringToUTF8OnStack(path);
-    return __wasmfs_chdir(buffer);
-  }),
-  read(stream, buffer, offset, length, position) {
-    var seeking = typeof position != "undefined";
-    var dataBuffer = _malloc(length);
-    var bytesRead;
-    if (seeking) {
-      bytesRead = __wasmfs_pread(stream.fd, dataBuffer, length, position);
-    } else {
-      bytesRead = __wasmfs_read(stream.fd, dataBuffer, length);
-    }
-    bytesRead = FS.handleError(bytesRead);
-    for (var i = 0; i < length; i++) {
-      buffer[offset + i] = SAFE_HEAP_LOAD((dataBuffer) + (i), 1, 0);
-    }
-    _free(dataBuffer);
-    return bytesRead;
-  },
-  write(stream, buffer, offset, length, position, canOwn) {
-    var seeking = typeof position != "undefined";
-    var dataBuffer = _malloc(length);
-    for (var i = 0; i < length; i++) {
-      SAFE_HEAP_STORE((dataBuffer) + (i), buffer[offset + i], 1);
-    }
-    var bytesRead;
-    if (seeking) {
-      bytesRead = __wasmfs_pwrite(stream.fd, dataBuffer, length, position);
-    } else {
-      bytesRead = __wasmfs_write(stream.fd, dataBuffer, length);
-    }
-    bytesRead = FS.handleError(bytesRead);
-    _free(dataBuffer);
-    return bytesRead;
-  },
-  allocate(stream, offset, length) {
-    return FS.handleError(__wasmfs_allocate(stream.fd, offset >>> 0, (tempDouble = offset, 
-    (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0), length >>> 0, (tempDouble = length, 
-    (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0)));
-  },
-  writeFile: (path, data) => FS_writeFile(path, data),
-  mmap: (stream, length, offset, prot, flags) => {
-    var buf = FS.handleError(__wasmfs_mmap(length, prot, flags, stream.fd, offset >>> 0, (tempDouble = offset, 
-    (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0)));
-    return {
-      ptr: buf,
-      allocated: true
-    };
-  },
-  msync: (stream, bufferPtr, offset, length, mmapFlags) => {
-    assert(offset === 0);
-    return FS.handleError(__wasmfs_msync(bufferPtr, length, mmapFlags));
-  },
-  munmap: (addr, length) => (FS.handleError(__wasmfs_munmap(addr, length))),
-  symlink: (target, linkpath) => withStackSave(() => (__wasmfs_symlink(stringToUTF8OnStack(target), stringToUTF8OnStack(linkpath)))),
-  readlink(path) {
-    var readBuffer = FS.handleError(withStackSave(() => __wasmfs_readlink(stringToUTF8OnStack(path))));
-    return UTF8ToString(readBuffer);
-  },
-  statBufToObject(statBuf) {
-    return {
-      dev: SAFE_HEAP_LOAD(((statBuf) >> 2) * 4, 4, 1),
-      mode: SAFE_HEAP_LOAD((((statBuf) + (4)) >> 2) * 4, 4, 1),
-      nlink: SAFE_HEAP_LOAD((((statBuf) + (8)) >> 2) * 4, 4, 1),
-      uid: SAFE_HEAP_LOAD((((statBuf) + (12)) >> 2) * 4, 4, 1),
-      gid: SAFE_HEAP_LOAD((((statBuf) + (16)) >> 2) * 4, 4, 1),
-      rdev: SAFE_HEAP_LOAD((((statBuf) + (20)) >> 2) * 4, 4, 1),
-      size: readI53FromI64((statBuf) + (24)),
-      blksize: SAFE_HEAP_LOAD((((statBuf) + (32)) >> 2) * 4, 4, 1),
-      blocks: SAFE_HEAP_LOAD((((statBuf) + (36)) >> 2) * 4, 4, 1),
-      atime: readI53FromI64((statBuf) + (40)),
-      mtime: readI53FromI64((statBuf) + (56)),
-      ctime: readI53FromI64((statBuf) + (72)),
-      ino: readI53FromU64((statBuf) + (88))
-    };
-  },
-  stat(path) {
-    var statBuf = _malloc(96);
-    FS.handleError(withStackSave(() => __wasmfs_stat(stringToUTF8OnStack(path), statBuf)));
-    var stats = FS.statBufToObject(statBuf);
-    _free(statBuf);
-    return stats;
-  },
-  lstat(path) {
-    var statBuf = _malloc(96);
-    FS.handleError(withStackSave(() => __wasmfs_lstat(stringToUTF8OnStack(path), statBuf)));
-    var stats = FS.statBufToObject(statBuf);
-    _free(statBuf);
-    return stats;
-  },
-  chmod(path, mode) {
-    return FS.handleError(withStackSave(() => {
-      var buffer = stringToUTF8OnStack(path);
-      return __wasmfs_chmod(buffer, mode);
-    }));
-  },
-  lchmod(path, mode) {
-    return FS.handleError(withStackSave(() => {
-      var buffer = stringToUTF8OnStack(path);
-      return __wasmfs_lchmod(buffer, mode);
-    }));
-  },
-  fchmod(fd, mode) {
-    return FS.handleError(__wasmfs_fchmod(fd, mode));
-  },
-  utime: (path, atime, mtime) => (FS.handleError(withStackSave(() => (__wasmfs_utime(stringToUTF8OnStack(path), atime, mtime))))),
-  truncate(path, len) {
-    return FS.handleError(withStackSave(() => (__wasmfs_truncate(stringToUTF8OnStack(path), len >>> 0, (tempDouble = len, 
-    (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0)))));
-  },
-  ftruncate(fd, len) {
-    return FS.handleError(__wasmfs_ftruncate(fd, len >>> 0, (tempDouble = len, (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0)));
-  },
-  findObject(path) {
-    var result = withStackSave(() => __wasmfs_identify(stringToUTF8OnStack(path)));
-    if (result == 44) {
-      return null;
-    }
-    return {
-      isFolder: result == 31,
-      isDevice: false
-    };
-  },
-  readdir: path => withStackSave(() => {
-    var pathBuffer = stringToUTF8OnStack(path);
-    var entries = [];
-    var state = __wasmfs_readdir_start(pathBuffer);
-    if (!state) {
-      throw new Error("No such directory");
-    }
-    var entry;
-    while (entry = __wasmfs_readdir_get(state)) {
-      entries.push(UTF8ToString(entry));
-    }
-    __wasmfs_readdir_finish(state);
-    return entries;
-  }),
-  mount: (type, opts, mountpoint) => {
-    if (typeof type == "string") {
-      throw type;
-    }
-    var backendPointer = type.createBackend(opts);
-    return FS.handleError(withStackSave(() => __wasmfs_mount(stringToUTF8OnStack(mountpoint), backendPointer)));
-  },
-  unmount: mountpoint => (FS.handleError(withStackSave(() => __wasmfs_unmount(stringToUTF8OnStack(mountpoint))))),
-  mknod: (path, mode, dev) => FS_mknod(path, mode, dev),
-  makedev: (ma, mi) => ((ma) << 8 | (mi)),
-  registerDevice(dev, ops) {
-    var backendPointer = _wasmfs_create_jsimpl_backend();
-    var definedOps = {
-      userRead: ops.read,
-      userWrite: ops.write,
-      allocFile: file => {
-        wasmFSDeviceStreams[file] = {};
-      },
-      freeFile: file => {
-        wasmFSDeviceStreams[file] = undefined;
-      },
-      getSize: file => {},
-      read: (file, buffer, length, offset) => {
-        var bufferArray = Module.HEAP8.subarray(buffer, buffer + length);
-        try {
-          var bytesRead = definedOps.userRead(wasmFSDeviceStreams[file], bufferArray, 0, length, offset);
-        } catch (e) {
-          return -e.errno;
-        }
-        Module.HEAP8.set(bufferArray, buffer);
-        return bytesRead;
-      },
-      write: (file, buffer, length, offset) => {
-        var bufferArray = Module.HEAP8.subarray(buffer, buffer + length);
-        try {
-          var bytesWritten = definedOps.userWrite(wasmFSDeviceStreams[file], bufferArray, 0, length, offset);
-        } catch (e) {
-          return -e.errno;
-        }
-        Module.HEAP8.set(bufferArray, buffer);
-        return bytesWritten;
-      }
-    };
-    wasmFS$backends[backendPointer] = definedOps;
-    wasmFSDevices[dev] = backendPointer;
-  },
-  createDevice(parent, name, input, output) {
-    if (typeof parent != "string") {
-      throw new Error("Only string paths are accepted");
-    }
-    var path = PATH.join2(parent, name);
-    var mode = FS_getMode(!!input, !!output);
-    if (!FS.createDevice.major) FS.createDevice.major = 64;
-    var dev = FS.makedev(FS.createDevice.major++, 0);
-    FS.registerDevice(dev, {
-      read(stream, buffer, offset, length, pos) {
-        /* ignored */ var bytesRead = 0;
-        for (var i = 0; i < length; i++) {
-          var result;
-          try {
-            result = input();
-          } catch (e) {
-            throw new FS.ErrnoError(29);
-          }
-          if (result === undefined && bytesRead === 0) {
-            throw new FS.ErrnoError(6);
-          }
-          if (result === null || result === undefined) break;
-          bytesRead++;
-          buffer[offset + i] = result;
-        }
-        return bytesRead;
-      },
-      write(stream, buffer, offset, length, pos) {
-        for (var i = 0; i < length; i++) {
-          try {
-            output(buffer[offset + i]);
-          } catch (e) {
-            throw new FS.ErrnoError(29);
-          }
-        }
-        return i;
-      }
-    });
-    return FS.mkdev(path, mode, dev);
-  },
-  mkdev(path, mode, dev) {
-    if (typeof dev === "undefined") {
-      dev = mode;
-      mode = 438;
-    }
-    var deviceBackend = wasmFSDevices[dev];
-    if (!deviceBackend) {
-      throw new Error("Invalid device ID.");
-    }
-    return FS.handleError(withStackSave(() => (_wasmfs_create_file(stringToUTF8OnStack(path), mode, deviceBackend))));
-  },
-  rename(oldPath, newPath) {
-    return FS.handleError(withStackSave(() => {
-      var oldPathBuffer = stringToUTF8OnStack(oldPath);
-      var newPathBuffer = stringToUTF8OnStack(newPath);
-      return __wasmfs_rename(oldPathBuffer, newPathBuffer);
-    }));
-  },
-  llseek(stream, offset, whence) {
-    return FS.handleError(__wasmfs_llseek(stream.fd, offset >>> 0, (tempDouble = offset, 
-    (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0), whence));
-  }
 };
 
 var uleb128Encode = (n, target) => {
@@ -3807,8 +3205,6 @@ var setWasmTableEntry = (idx, func) => {
   return ret;
 };
 
-var FS_createPath = FS.createPath;
-
 PThread.init();
 
 embind_init_charCodes();
@@ -3830,8 +3226,6 @@ InternalError = Module["InternalError"] = class InternalError extends Error {
 init_emval();
 
 UnboundTypeError = Module["UnboundTypeError"] = extendError(Error, "UnboundTypeError");
-
-FS.init();
 
 var proxiedFunctionTable = [ _proc_exit, exitOnMainThread, pthreadCreateProxied ];
 
@@ -3873,11 +3267,6 @@ function assignWasmImports() {
     /** @export */ _wasmfs_get_preloaded_file_size: __wasmfs_get_preloaded_file_size,
     /** @export */ _wasmfs_get_preloaded_parent_path: __wasmfs_get_preloaded_parent_path,
     /** @export */ _wasmfs_get_preloaded_path_name: __wasmfs_get_preloaded_path_name,
-    /** @export */ _wasmfs_jsimpl_alloc_file: __wasmfs_jsimpl_alloc_file,
-    /** @export */ _wasmfs_jsimpl_free_file: __wasmfs_jsimpl_free_file,
-    /** @export */ _wasmfs_jsimpl_get_size: __wasmfs_jsimpl_get_size,
-    /** @export */ _wasmfs_jsimpl_read: __wasmfs_jsimpl_read,
-    /** @export */ _wasmfs_jsimpl_write: __wasmfs_jsimpl_write,
     /** @export */ _wasmfs_opfs_close_access: __wasmfs_opfs_close_access,
     /** @export */ _wasmfs_opfs_close_blob: __wasmfs_opfs_close_blob,
     /** @export */ _wasmfs_opfs_flush_access: __wasmfs_opfs_flush_access,
@@ -3903,6 +3292,7 @@ function assignWasmImports() {
     /** @export */ _wasmfs_stdin_get_char: __wasmfs_stdin_get_char,
     /** @export */ _wasmfs_thread_utils_heartbeat: __wasmfs_thread_utils_heartbeat,
     /** @export */ alignfault: alignfault,
+    /** @export */ emscripten_asm_const_int_sync_on_main_thread: _emscripten_asm_const_int_sync_on_main_thread,
     /** @export */ emscripten_check_blocking_allowed: _emscripten_check_blocking_allowed,
     /** @export */ emscripten_date_now: _emscripten_date_now,
     /** @export */ emscripten_err: _emscripten_err,
@@ -3932,8 +3322,6 @@ var _malloc = createExportWrapper("malloc", 1);
 var _pthread_self = () => (_pthread_self = wasmExports["pthread_self"])();
 
 var __emscripten_tls_init = createExportWrapper("_emscripten_tls_init", 0);
-
-var _emscripten_builtin_memalign = createExportWrapper("emscripten_builtin_memalign", 2);
 
 var __emscripten_thread_init = createExportWrapper("_emscripten_thread_init", 6);
 
@@ -3981,85 +3369,7 @@ var _emscripten_stack_get_current = () => (_emscripten_stack_get_current = wasmE
 
 var ___cxa_is_pointer_type = createExportWrapper("__cxa_is_pointer_type", 1);
 
-var __wasmfs_read_file = createExportWrapper("_wasmfs_read_file", 1);
-
-var __wasmfs_write_file = createExportWrapper("_wasmfs_write_file", 3);
-
-var __wasmfs_mkdir = createExportWrapper("_wasmfs_mkdir", 2);
-
-var __wasmfs_rmdir = createExportWrapper("_wasmfs_rmdir", 1);
-
-var __wasmfs_open = createExportWrapper("_wasmfs_open", 3);
-
-var __wasmfs_allocate = createExportWrapper("_wasmfs_allocate", 5);
-
-var __wasmfs_mknod = createExportWrapper("_wasmfs_mknod", 3);
-
-var __wasmfs_unlink = createExportWrapper("_wasmfs_unlink", 1);
-
-var __wasmfs_chdir = createExportWrapper("_wasmfs_chdir", 1);
-
-var __wasmfs_symlink = createExportWrapper("_wasmfs_symlink", 2);
-
-var __wasmfs_readlink = createExportWrapper("_wasmfs_readlink", 1);
-
-var __wasmfs_write = createExportWrapper("_wasmfs_write", 3);
-
-var __wasmfs_pwrite = createExportWrapper("_wasmfs_pwrite", 5);
-
-var __wasmfs_chmod = createExportWrapper("_wasmfs_chmod", 2);
-
-var __wasmfs_fchmod = createExportWrapper("_wasmfs_fchmod", 2);
-
-var __wasmfs_lchmod = createExportWrapper("_wasmfs_lchmod", 2);
-
-var __wasmfs_llseek = createExportWrapper("_wasmfs_llseek", 4);
-
-var __wasmfs_rename = createExportWrapper("_wasmfs_rename", 2);
-
-var __wasmfs_read = createExportWrapper("_wasmfs_read", 3);
-
-var __wasmfs_pread = createExportWrapper("_wasmfs_pread", 5);
-
-var __wasmfs_truncate = createExportWrapper("_wasmfs_truncate", 3);
-
-var __wasmfs_ftruncate = createExportWrapper("_wasmfs_ftruncate", 3);
-
-var __wasmfs_close = createExportWrapper("_wasmfs_close", 1);
-
-var __wasmfs_mmap = createExportWrapper("_wasmfs_mmap", 6);
-
-var __wasmfs_msync = createExportWrapper("_wasmfs_msync", 3);
-
-var __wasmfs_munmap = createExportWrapper("_wasmfs_munmap", 2);
-
-var __wasmfs_utime = createExportWrapper("_wasmfs_utime", 3);
-
-var __wasmfs_stat = createExportWrapper("_wasmfs_stat", 2);
-
-var __wasmfs_lstat = createExportWrapper("_wasmfs_lstat", 2);
-
-var __wasmfs_mount = createExportWrapper("_wasmfs_mount", 2);
-
-var __wasmfs_unmount = createExportWrapper("_wasmfs_unmount", 1);
-
-var __wasmfs_identify = createExportWrapper("_wasmfs_identify", 1);
-
-var __wasmfs_readdir_start = createExportWrapper("_wasmfs_readdir_start", 1);
-
-var __wasmfs_readdir_get = createExportWrapper("_wasmfs_readdir_get", 1);
-
-var __wasmfs_readdir_finish = createExportWrapper("_wasmfs_readdir_finish", 1);
-
-var __wasmfs_get_cwd = createExportWrapper("_wasmfs_get_cwd", 0);
-
-var _wasmfs_create_jsimpl_backend = createExportWrapper("wasmfs_create_jsimpl_backend", 0);
-
-var _wasmfs_create_memory_backend = createExportWrapper("wasmfs_create_memory_backend", 0);
-
 var __wasmfs_opfs_record_entry = createExportWrapper("_wasmfs_opfs_record_entry", 3);
-
-var _wasmfs_create_file = createExportWrapper("wasmfs_create_file", 3);
 
 var _wasmfs_flush = createExportWrapper("wasmfs_flush", 0);
 
@@ -4071,27 +3381,13 @@ var dynCall_iiiij = Module["dynCall_iiiij"] = createExportWrapper("dynCall_iiiij
 
 var dynCall_iij = Module["dynCall_iij"] = createExportWrapper("dynCall_iij", 4);
 
-Module["addRunDependency"] = addRunDependency;
-
-Module["removeRunDependency"] = removeRunDependency;
-
 Module["addFunction"] = addFunction;
 
-Module["FS_createPreloadedFile"] = FS_createPreloadedFile;
-
-Module["FS_unlink"] = FS_unlink;
-
-Module["FS_createPath"] = FS_createPath;
-
-Module["FS"] = FS;
-
-Module["FS_createDataFile"] = FS_createDataFile;
-
-var missingLibrarySymbols = [ "writeI53ToI64", "writeI53ToI64Clamped", "writeI53ToI64Signaling", "writeI53ToU64Clamped", "writeI53ToU64Signaling", "convertI32PairToI53", "convertU32PairToI53", "getTempRet0", "setTempRet0", "growMemory", "isLeapYear", "ydayFromDate", "arraySum", "addDays", "inetPton4", "inetNtop4", "inetPton6", "inetNtop6", "readSockaddr", "writeSockaddr", "emscriptenLog", "readEmAsmArgs", "jstoi_q", "getExecutableName", "listenOnce", "autoResumeAudioContext", "runtimeKeepalivePop", "asmjsMangle", "alignMemory", "mmapAlloc", "getNativeTypeSize", "STACK_SIZE", "STACK_ALIGN", "POINTER_SIZE", "ASSERTIONS", "getCFunc", "ccall", "cwrap", "removeFunction", "reallyNegative", "strLen", "reSign", "formatString", "intArrayToString", "AsciiToString", "stringToAscii", "stringToNewUTF8", "writeArrayToMemory", "registerKeyEventCallback", "maybeCStringToJsString", "findEventTarget", "getBoundingClientRect", "fillMouseEventData", "registerMouseEventCallback", "registerWheelEventCallback", "registerUiEventCallback", "registerFocusEventCallback", "fillDeviceOrientationEventData", "registerDeviceOrientationEventCallback", "fillDeviceMotionEventData", "registerDeviceMotionEventCallback", "screenOrientation", "fillOrientationChangeEventData", "registerOrientationChangeEventCallback", "fillFullscreenChangeEventData", "registerFullscreenChangeEventCallback", "JSEvents_requestFullscreen", "JSEvents_resizeCanvasForFullscreen", "registerRestoreOldStyle", "hideEverythingExceptGivenElement", "restoreHiddenElements", "setLetterbox", "softFullscreenResizeWebGLRenderTarget", "doRequestFullscreen", "fillPointerlockChangeEventData", "registerPointerlockChangeEventCallback", "registerPointerlockErrorEventCallback", "requestPointerLock", "fillVisibilityChangeEventData", "registerVisibilityChangeEventCallback", "registerTouchEventCallback", "fillGamepadEventData", "registerGamepadEventCallback", "registerBeforeUnloadEventCallback", "fillBatteryEventData", "battery", "registerBatteryEventCallback", "setCanvasElementSizeCallingThread", "setCanvasElementSizeMainThread", "setCanvasElementSize", "getCanvasSizeCallingThread", "getCanvasSizeMainThread", "getCanvasElementSize", "jsStackTrace", "getCallstack", "convertPCtoSourceLocation", "getEnvStrings", "checkWasiClock", "flush_NO_FILESYSTEM", "wasiRightsToMuslOFlags", "wasiOFlagsToMuslOFlags", "createDyncallWrapper", "safeSetTimeout", "setImmediateWrapped", "clearImmediateWrapped", "polyfillSetImmediate", "getPromise", "makePromise", "idsToPromises", "makePromiseCallback", "findMatchingCatch", "Browser_asyncPrepareDataCounter", "setMainLoop", "wasmfsNodeConvertNodeCode", "wasmfsTry", "wasmfsNodeFixStat", "wasmfsNodeLstat", "wasmfsNodeFstat", "heapObjectForWebGLType", "toTypedArrayIndex", "webgl_enable_ANGLE_instanced_arrays", "webgl_enable_OES_vertex_array_object", "webgl_enable_WEBGL_draw_buffers", "webgl_enable_WEBGL_multi_draw", "emscriptenWebGLGet", "computeUnpackAlignedImageSize", "colorChannelsInGlTextureFormat", "emscriptenWebGLGetTexPixelData", "emscriptenWebGLGetUniform", "webglGetUniformLocation", "webglPrepareUniformLocationsBeforeFirstUse", "webglGetLeftBracePos", "emscriptenWebGLGetVertexAttrib", "__glGetActiveAttribOrUniform", "writeGLArray", "emscripten_webgl_destroy_context_before_on_calling_thread", "registerWebGlEventCallback", "runAndAbortIfError", "ALLOC_NORMAL", "ALLOC_STACK", "allocate", "writeStringToMemory", "writeAsciiToMemory", "setErrNo", "demangle", "stackTrace", "getFunctionArgsName", "requireRegisteredType", "createJsInvokerSignature", "init_embind", "getBasestPointer", "registerInheritedInstance", "unregisterInheritedInstance", "getInheritedInstance", "getInheritedInstanceCount", "getLiveInheritedInstances", "enumReadValueFromPointer", "genericPointerToWireType", "constNoSmartPtrRawPointerToWireType", "nonConstNoSmartPtrRawPointerToWireType", "init_RegisteredPointer", "RegisteredPointer", "RegisteredPointer_fromWireType", "runDestructor", "releaseClassHandle", "detachFinalizer", "attachFinalizer", "makeClassHandle", "init_ClassHandle", "ClassHandle", "throwInstanceAlreadyDeleted", "flushPendingDeletes", "setDelayFunction", "RegisteredClass", "shallowCopyInternalPointer", "downcastPointer", "upcastPointer", "validateThis", "char_0", "char_9", "makeLegalFunctionName", "getStringOrSymbol", "emval_get_global", "emval_returnValue", "emval_lookupTypes", "emval_addMethodCaller" ];
+var missingLibrarySymbols = [ "writeI53ToI64", "writeI53ToI64Clamped", "writeI53ToI64Signaling", "writeI53ToU64Clamped", "writeI53ToU64Signaling", "readI53FromI64", "readI53FromU64", "convertI32PairToI53", "convertU32PairToI53", "getTempRet0", "setTempRet0", "growMemory", "isLeapYear", "ydayFromDate", "arraySum", "addDays", "inetPton4", "inetNtop4", "inetPton6", "inetNtop6", "readSockaddr", "writeSockaddr", "emscriptenLog", "runEmAsmFunction", "jstoi_q", "getExecutableName", "listenOnce", "autoResumeAudioContext", "runtimeKeepalivePop", "asmjsMangle", "asyncLoad", "alignMemory", "mmapAlloc", "getNativeTypeSize", "STACK_SIZE", "STACK_ALIGN", "POINTER_SIZE", "ASSERTIONS", "getCFunc", "ccall", "cwrap", "removeFunction", "reallyNegative", "strLen", "reSign", "formatString", "intArrayToString", "AsciiToString", "stringToAscii", "stringToNewUTF8", "stringToUTF8OnStack", "writeArrayToMemory", "registerKeyEventCallback", "maybeCStringToJsString", "findEventTarget", "getBoundingClientRect", "fillMouseEventData", "registerMouseEventCallback", "registerWheelEventCallback", "registerUiEventCallback", "registerFocusEventCallback", "fillDeviceOrientationEventData", "registerDeviceOrientationEventCallback", "fillDeviceMotionEventData", "registerDeviceMotionEventCallback", "screenOrientation", "fillOrientationChangeEventData", "registerOrientationChangeEventCallback", "fillFullscreenChangeEventData", "registerFullscreenChangeEventCallback", "JSEvents_requestFullscreen", "JSEvents_resizeCanvasForFullscreen", "registerRestoreOldStyle", "hideEverythingExceptGivenElement", "restoreHiddenElements", "setLetterbox", "softFullscreenResizeWebGLRenderTarget", "doRequestFullscreen", "fillPointerlockChangeEventData", "registerPointerlockChangeEventCallback", "registerPointerlockErrorEventCallback", "requestPointerLock", "fillVisibilityChangeEventData", "registerVisibilityChangeEventCallback", "registerTouchEventCallback", "fillGamepadEventData", "registerGamepadEventCallback", "registerBeforeUnloadEventCallback", "fillBatteryEventData", "battery", "registerBatteryEventCallback", "setCanvasElementSizeCallingThread", "setCanvasElementSizeMainThread", "setCanvasElementSize", "getCanvasSizeCallingThread", "getCanvasSizeMainThread", "getCanvasElementSize", "jsStackTrace", "getCallstack", "convertPCtoSourceLocation", "getEnvStrings", "checkWasiClock", "flush_NO_FILESYSTEM", "wasiRightsToMuslOFlags", "wasiOFlagsToMuslOFlags", "createDyncallWrapper", "safeSetTimeout", "setImmediateWrapped", "clearImmediateWrapped", "polyfillSetImmediate", "getPromise", "makePromise", "idsToPromises", "makePromiseCallback", "findMatchingCatch", "Browser_asyncPrepareDataCounter", "setMainLoop", "FS_createPreloadedFile", "FS_modeStringToFlags", "FS_getMode", "FS_unlink", "FS_createDataFile", "FS_mknod", "FS_create", "FS_writeFile", "FS_mkdir", "FS_mkdirTree", "wasmfsNodeConvertNodeCode", "wasmfsTry", "wasmfsNodeFixStat", "wasmfsNodeLstat", "wasmfsNodeFstat", "heapObjectForWebGLType", "toTypedArrayIndex", "webgl_enable_ANGLE_instanced_arrays", "webgl_enable_OES_vertex_array_object", "webgl_enable_WEBGL_draw_buffers", "webgl_enable_WEBGL_multi_draw", "emscriptenWebGLGet", "computeUnpackAlignedImageSize", "colorChannelsInGlTextureFormat", "emscriptenWebGLGetTexPixelData", "emscriptenWebGLGetUniform", "webglGetUniformLocation", "webglPrepareUniformLocationsBeforeFirstUse", "webglGetLeftBracePos", "emscriptenWebGLGetVertexAttrib", "__glGetActiveAttribOrUniform", "writeGLArray", "emscripten_webgl_destroy_context_before_on_calling_thread", "registerWebGlEventCallback", "runAndAbortIfError", "ALLOC_NORMAL", "ALLOC_STACK", "allocate", "writeStringToMemory", "writeAsciiToMemory", "setErrNo", "demangle", "stackTrace", "getFunctionArgsName", "requireRegisteredType", "createJsInvokerSignature", "init_embind", "getBasestPointer", "registerInheritedInstance", "unregisterInheritedInstance", "getInheritedInstance", "getInheritedInstanceCount", "getLiveInheritedInstances", "enumReadValueFromPointer", "genericPointerToWireType", "constNoSmartPtrRawPointerToWireType", "nonConstNoSmartPtrRawPointerToWireType", "init_RegisteredPointer", "RegisteredPointer", "RegisteredPointer_fromWireType", "runDestructor", "releaseClassHandle", "detachFinalizer", "attachFinalizer", "makeClassHandle", "init_ClassHandle", "ClassHandle", "throwInstanceAlreadyDeleted", "flushPendingDeletes", "setDelayFunction", "RegisteredClass", "shallowCopyInternalPointer", "downcastPointer", "upcastPointer", "validateThis", "char_0", "char_9", "makeLegalFunctionName", "getStringOrSymbol", "emval_get_global", "emval_returnValue", "emval_lookupTypes", "emval_addMethodCaller" ];
 
 missingLibrarySymbols.forEach(missingLibrarySymbol);
 
-var unexportedSymbols = [ "run", "addOnPreRun", "addOnInit", "addOnPreMain", "addOnExit", "addOnPostRun", "out", "err", "callMain", "abort", "wasmMemory", "wasmExports", "writeStackCookie", "checkStackCookie", "readI53FromI64", "readI53FromU64", "convertI32PairToI53Checked", "stackSave", "stackRestore", "stackAlloc", "ptrToString", "zeroMemory", "exitJS", "getHeapMax", "abortOnCannotGrowMemory", "ENV", "MONTH_DAYS_REGULAR", "MONTH_DAYS_LEAP", "MONTH_DAYS_REGULAR_CUMULATIVE", "MONTH_DAYS_LEAP_CUMULATIVE", "ERRNO_CODES", "ERRNO_MESSAGES", "DNS", "Protocols", "Sockets", "initRandomFill", "randomFill", "timers", "warnOnce", "readEmAsmArgsArray", "jstoi_s", "dynCallLegacy", "getDynCaller", "dynCall", "handleException", "keepRuntimeAlive", "runtimeKeepalivePush", "callUserCallback", "maybeExit", "asyncLoad", "HandleAllocator", "wasmTable", "noExitRuntime", "uleb128Encode", "sigToWasmTypes", "generateFuncType", "convertJsFunctionToWasm", "freeTableIndexes", "functionsInTableMap", "getEmptyTableSlot", "updateTableMap", "getFunctionAddress", "unSign", "setValue", "getValue", "PATH", "PATH_FS", "UTF8Decoder", "UTF8ArrayToString", "UTF8ToString", "stringToUTF8Array", "stringToUTF8", "lengthBytesUTF8", "intArrayFromString", "UTF16Decoder", "UTF16ToString", "stringToUTF16", "lengthBytesUTF16", "UTF32ToString", "stringToUTF32", "lengthBytesUTF32", "stringToUTF8OnStack", "JSEvents", "specialHTMLTargets", "findCanvasEventTarget", "currentFullscreenStrategy", "restoreOldWindowedStyle", "UNWIND_CACHE", "ExitStatus", "promiseMap", "uncaughtExceptionCount", "exceptionLast", "exceptionCaught", "ExceptionInfo", "Browser", "getPreloadedImageData__data", "wget", "preloadPlugins", "FS_modeStringToFlags", "FS_getMode", "FS_stdin_getChar_buffer", "FS_stdin_getChar", "FS_createDevice", "FS_readFile", "MEMFS", "wasmFSPreloadedFiles", "wasmFSPreloadedDirs", "wasmFSPreloadingFlushed", "wasmFSDevices", "wasmFSDeviceStreams", "FS_mknod", "FS_create", "FS_writeFile", "FS_mkdir", "FS_mkdirTree", "wasmFS$JSMemoryFiles", "wasmFS$backends", "wasmfsNodeIsWindows", "wasmfsOPFSDirectoryHandles", "wasmfsOPFSFileHandles", "wasmfsOPFSAccessHandles", "wasmfsOPFSBlobs", "wasmfsOPFSProxyFinish", "wasmfsOPFSGetOrCreateFile", "wasmfsOPFSGetOrCreateDir", "tempFixedLengthArray", "miniTempWebGLFloatBuffers", "miniTempWebGLIntBuffers", "GL", "AL", "GLUT", "EGL", "GLEW", "IDBStore", "SDL", "SDL_gfx", "allocateUTF8", "allocateUTF8OnStack", "print", "printErr", "PThread", "terminateWorker", "killThread", "cleanupThread", "registerTLSInit", "cancelThread", "spawnThread", "exitOnMainThread", "proxyToMainThread", "proxiedJSCallArgs", "invokeEntryPoint", "checkMailbox", "InternalError", "BindingError", "throwInternalError", "throwBindingError", "registeredTypes", "awaitingDependencies", "typeDependencies", "tupleRegistrations", "structRegistrations", "sharedRegisterType", "whenDependentTypesAreResolved", "embind_charCodes", "embind_init_charCodes", "readLatin1String", "getTypeName", "getFunctionName", "heap32VectorToArray", "usesDestructorStack", "createJsInvoker", "UnboundTypeError", "PureVirtualError", "GenericWireTypeSize", "EmValType", "throwUnboundTypeError", "ensureOverloadTable", "exposePublicSymbol", "replacePublicSymbol", "extendError", "createNamedFunction", "embindRepr", "registeredInstances", "registeredPointers", "registerType", "integerReadValueFromPointer", "floatReadValueFromPointer", "readPointer", "runDestructors", "newFunc", "craftInvokerFunction", "embind__requireFunction", "finalizationRegistry", "detachFinalizer_deps", "deletionQueue", "delayFunction", "emval_freelist", "emval_handles", "emval_symbols", "init_emval", "count_emval_handles", "Emval", "emval_methodCallers", "reflectConstruct" ];
+var unexportedSymbols = [ "run", "addOnPreRun", "addOnInit", "addOnPreMain", "addOnExit", "addOnPostRun", "addRunDependency", "removeRunDependency", "out", "err", "callMain", "abort", "wasmMemory", "wasmExports", "writeStackCookie", "checkStackCookie", "convertI32PairToI53Checked", "stackSave", "stackRestore", "stackAlloc", "ptrToString", "zeroMemory", "exitJS", "getHeapMax", "abortOnCannotGrowMemory", "ENV", "MONTH_DAYS_REGULAR", "MONTH_DAYS_LEAP", "MONTH_DAYS_REGULAR_CUMULATIVE", "MONTH_DAYS_LEAP_CUMULATIVE", "ERRNO_CODES", "ERRNO_MESSAGES", "DNS", "Protocols", "Sockets", "initRandomFill", "randomFill", "timers", "warnOnce", "readEmAsmArgsArray", "readEmAsmArgs", "runMainThreadEmAsm", "jstoi_s", "dynCallLegacy", "getDynCaller", "dynCall", "handleException", "keepRuntimeAlive", "runtimeKeepalivePush", "callUserCallback", "maybeExit", "HandleAllocator", "wasmTable", "noExitRuntime", "uleb128Encode", "sigToWasmTypes", "generateFuncType", "convertJsFunctionToWasm", "freeTableIndexes", "functionsInTableMap", "getEmptyTableSlot", "updateTableMap", "getFunctionAddress", "unSign", "setValue", "getValue", "PATH", "PATH_FS", "UTF8Decoder", "UTF8ArrayToString", "UTF8ToString", "stringToUTF8Array", "stringToUTF8", "lengthBytesUTF8", "intArrayFromString", "UTF16Decoder", "UTF16ToString", "stringToUTF16", "lengthBytesUTF16", "UTF32ToString", "stringToUTF32", "lengthBytesUTF32", "JSEvents", "specialHTMLTargets", "findCanvasEventTarget", "currentFullscreenStrategy", "restoreOldWindowedStyle", "UNWIND_CACHE", "ExitStatus", "promiseMap", "uncaughtExceptionCount", "exceptionLast", "exceptionCaught", "ExceptionInfo", "Browser", "getPreloadedImageData__data", "wget", "preloadPlugins", "FS_stdin_getChar_buffer", "FS_stdin_getChar", "FS_createPath", "FS_createDevice", "FS_readFile", "MEMFS", "wasmFSPreloadedFiles", "wasmFSPreloadedDirs", "wasmFSPreloadingFlushed", "wasmFSDevices", "wasmFSDeviceStreams", "FS", "wasmFS$JSMemoryFiles", "wasmFS$backends", "wasmfsNodeIsWindows", "wasmfsOPFSDirectoryHandles", "wasmfsOPFSFileHandles", "wasmfsOPFSAccessHandles", "wasmfsOPFSBlobs", "wasmfsOPFSProxyFinish", "wasmfsOPFSGetOrCreateFile", "wasmfsOPFSGetOrCreateDir", "tempFixedLengthArray", "miniTempWebGLFloatBuffers", "miniTempWebGLIntBuffers", "GL", "AL", "GLUT", "EGL", "GLEW", "IDBStore", "SDL", "SDL_gfx", "allocateUTF8", "allocateUTF8OnStack", "print", "printErr", "PThread", "terminateWorker", "killThread", "cleanupThread", "registerTLSInit", "cancelThread", "spawnThread", "exitOnMainThread", "proxyToMainThread", "proxiedJSCallArgs", "invokeEntryPoint", "checkMailbox", "InternalError", "BindingError", "throwInternalError", "throwBindingError", "registeredTypes", "awaitingDependencies", "typeDependencies", "tupleRegistrations", "structRegistrations", "sharedRegisterType", "whenDependentTypesAreResolved", "embind_charCodes", "embind_init_charCodes", "readLatin1String", "getTypeName", "getFunctionName", "heap32VectorToArray", "usesDestructorStack", "createJsInvoker", "UnboundTypeError", "PureVirtualError", "GenericWireTypeSize", "EmValType", "throwUnboundTypeError", "ensureOverloadTable", "exposePublicSymbol", "replacePublicSymbol", "extendError", "createNamedFunction", "embindRepr", "registeredInstances", "registeredPointers", "registerType", "integerReadValueFromPointer", "floatReadValueFromPointer", "readPointer", "runDestructors", "newFunc", "craftInvokerFunction", "embind__requireFunction", "finalizationRegistry", "detachFinalizer_deps", "deletionQueue", "delayFunction", "emval_freelist", "emval_handles", "emval_symbols", "init_emval", "count_emval_handles", "Emval", "emval_methodCallers", "reflectConstruct" ];
 
 unexportedSymbols.forEach(unexportedRuntimeSymbol);
 

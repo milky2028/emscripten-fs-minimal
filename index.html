@@ -11,6 +11,18 @@
     <script type="module">
       import initializer from "./dist/lib.js";
 
+      function asyncWasm(fn, ...args) {
+        const id = crypto.randomUUID();
+
+        return new Promise((resolve) => {
+          globalThis.addEventListener(id, () => resolve(), {
+            once: true,
+          });
+
+          fn(id, ...args);
+        });
+      }
+
       const module = await initializer();
       const { read_file, list_files, setup_fs, addFunction } = module;
 
@@ -19,7 +31,7 @@
         create: true,
       });
 
-      setup_fs();
+      await asyncWasm(setup_fs);
       console.log((window.module = module));
 
       const input = document.querySelector("input");
@@ -37,7 +49,7 @@
       const btn = document.querySelector("button");
       btn.addEventListener("click", () => {
         list_files("/");
-        console.log(read_file("/persistent/some-file.txt"));
+        console.log(read_file("/opfs/some-file.txt"));
       });
     </script>
   </body>

@@ -1,19 +1,17 @@
 emcc \
 -sASSERTIONS \
 -sSAFE_HEAP \
--sSTACK_OVERFLOW_CHECK=1 \
+-sSTACK_OVERFLOW_CHECK \
 -sEXPORT_ES6 \
 -sWASMFS \
 -sALLOW_TABLE_GROWTH \
 -pthread \
--sFORCE_FILESYSTEM \
--sEXPORTED_RUNTIME_METHODS=FS,addFunction \
+-sEXPORTED_RUNTIME_METHODS=addFunction \
 -sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency \
 -sENVIRONMENT=web,worker \
 -O0 \
 -g \
 -gsource-map \
--O0 \
 -std=c++20 \
 -lembind \
 --emit-tsd extract.d.ts \
