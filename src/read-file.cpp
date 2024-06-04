@@ -41,7 +41,7 @@ auto setup_fs() {
   std::thread([&] {
     auto opfs = wasmfs_create_opfs_backend();
 
-    // This does not actually create a directory called 'persistent' in OPFS.
+    // This does not actually create a directory in OPFS.
     // What this does is create virtual directory in WASM and any writes to that directory in WASM are
     // associated with that particular backend. Using wasmfs_create_directory, you could create a directory structure
     // that looked like:
