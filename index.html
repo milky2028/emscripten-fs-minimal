@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+  </head>
+  <body>
+    <input type="file" />
+    <button>List Files</button>
+    <script type="module">
+      import initializer from "./dist/lib.js";
+
+      const module = await initializer();
+      const { read_file, list_files, setup_fs, addFunction } = module;
+
+      const root = await navigator.storage.getDirectory();
+      const persistent = await root.getDirectoryHandle("persistent", {
+        create: true,
+      });
+
+      setup_fs();
+      console.log((window.module = module));
+
+      const input = document.querySelector("input");
+      input.addEventListener("change", async ({ target: { files } }) => {
+        const file = files[0];
+
+        const handle = await root.getFileHandle("some-file.txt", {
+          create: true,
+        });
+
+        const writer = await handle.createWritable();
+        await file.stream().pipeTo(writer);
+      });
+
+      const btn = document.querySelector("button");
+      btn.addEventListener("click", () => {
+        list_files("/");
+        console.log(read_file("/persistent/some-file.txt"));
+      });
+    </script>
+  </body>
+</html>
