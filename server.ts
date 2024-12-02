@@ -47,3 +47,21 @@ async function handler(req: Request): Promise<Response> {
 
 console.log(`HTTP webserver running. Access it at: http://localhost:8080/`);
 await serve(handler, { port });
+
+
+
+
+
+
+
+
+interface ExistingApplication {}
+
+const stuff = { 
+  existingProgramApp?: ExistingApplication
+ }
+
+if (!stuff.existingProgramApp) {
+  stuff.existingProgramApp = 'something new'
+  // do cool stuff
+}
